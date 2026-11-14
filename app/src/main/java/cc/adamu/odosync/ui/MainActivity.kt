@@ -8,8 +8,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.DeleteSweep
+import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Share
+import androidx.compose.material.icons.outlined.Speed
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import cc.adamu.odosync.data.EventLog
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -19,11 +31,8 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.dynamicDarkColorScheme
-import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -83,30 +92,60 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class Tab(val label: String, val icon: ImageVector) {
+    DASHBOARD("Dashboard", Icons.Outlined.Speed),
+    ACTIVITY("Activity", Icons.Outlined.History),
+    SETTINGS("Settings", Icons.Outlined.Settings),
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Root(activity: MainActivity) {
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    var tab by rememberSaveable { mutableStateOf(Tab.DASHBOARD) }
+    val ctx = LocalContext.current
+    val settings by Settings.get(ctx).flow.collectAsStateWithLifecycle()
     Scaffold(
-        topBar = { TopAppBar(title = { Text(if (tab == 0) "OdoSync" else "Setup") }) },
+        containerColor = MaterialTheme.colorScheme.background,
+        topBar = {
+            TopAppBar(
+                title = {
+                    when (tab) {
+                        Tab.DASHBOARD -> Column {
+                            Text("OdoSync", style = MaterialTheme.typography.titleLarge)
+                            if (settings.vehicleName.isNotBlank()) {
+                                Text(settings.vehicleName, style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                        else -> Text(tab.label)
+                    }
+                },
+                actions = {
+                    if (tab == Tab.ACTIVITY) {
+                        IconButton(onClick = { shareLog(ctx) }) { Icon(Icons.Outlined.Share, "Share log") }
+                        IconButton(onClick = { EventLog.clear() }) { Icon(Icons.Outlined.DeleteSweep, "Clear log") }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+            )
+        },
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(selected = tab == 0, onClick = { tab = 0 },
-                    icon = { Text("◉") }, label = { Text("Status") })
-                NavigationBarItem(selected = tab == 1, onClick = { tab = 1 },
-                    icon = { Text("⚙") }, label = { Text("Setup") })
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+                Tab.entries.forEach { t ->
+                    NavigationBarItem(
+                        selected = tab == t, onClick = { tab = t },
+                        icon = { Icon(t.icon, null) }, label = { Text(t.label) },
+                    )
+                }
             }
         },
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
-            if (tab == 0) StatusScreen(activity, onOpenSetup = { tab = 1 }) else SetupScreen(activity)
+            when (tab) {
+                Tab.DASHBOARD -> DashboardScreen(activity, onOpenSettings = { tab = Tab.SETTINGS })
+                Tab.ACTIVITY -> ActivityScreen()
+                Tab.SETTINGS -> SettingsScreen(activity)
+            }
         }
     }
-}
-
-@Composable
-fun OdoSyncTheme(content: @Composable () -> Unit) {
-    val ctx = LocalContext.current
-    val scheme = if (isSystemInDarkTheme()) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-    MaterialTheme(colorScheme = scheme, content = content)
 }

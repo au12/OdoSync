@@ -58,6 +58,15 @@ android {
         buildConfig = true
     }
 
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all {
+            it.systemProperty("screenshots.dir", rootProject.file("docs/screenshots").absolutePath)
+            // ./gradlew :app:testDebugUnitTest -PrecordScreenshots  -> refresh docs/screenshots/*.png
+            it.systemProperty("screenshots.record", project.hasProperty("recordScreenshots").toString())
+        }
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -74,7 +83,7 @@ dependencies {
     implementation(composeBom)
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
-    implementation("androidx.compose.material:material-icons-core:1.7.8")
+    implementation("androidx.compose.material:material-icons-extended:1.7.8")
     implementation("androidx.activity:activity-compose:1.12.4")
 
     implementation("androidx.core:core-ktx:1.17.0")
@@ -86,4 +95,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     testImplementation("junit:junit:4.13.2")
+    // Screen smoke tests: render every screen on the JVM (Robolectric native graphics) and save PNGs.
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }

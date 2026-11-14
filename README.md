@@ -7,6 +7,13 @@ through a **Veepeak OBDCheck BLE** dongle. After every drive it posts the readin
 It's built to sit next to **wireless Android Auto** without getting in its way. Music, calls and maps behave
 exactly as before (see [Android Auto coexistence](#android-auto-coexistence)).
 
+<p align="center">
+  <img src="docs/screenshots/dashboard-light.png" width="23%" alt="Dashboard (light)">
+  <img src="docs/screenshots/dashboard-dark.png" width="23%" alt="Dashboard (dark)">
+  <img src="docs/screenshots/activity.png" width="23%" alt="Activity log">
+  <img src="docs/screenshots/settings-dark.png" width="23%" alt="Settings">
+</p>
+
 ```
  Veepeak (OBD port) ──BLE──▶ OdoSync (phone) ──HTTPS, after the trip──▶ LubeLogger
         │                         ▲
@@ -113,6 +120,9 @@ trip start/end and upload.
 ```bash
 ./gradlew :app:testDebugUnitTest :app:assembleRelease
 ```
+
+The unit tests include `ScreensTest`, which renders every screen on the JVM (Robolectric) as a
+crash check. Add `-PrecordScreenshots` to refresh the PNGs in `docs/screenshots/`.
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and Android lint on every push and pull
 request, then builds a release APK and uploads it as a workflow artifact. To publish a GitHub

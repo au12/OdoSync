@@ -4,15 +4,17 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import androidx.work.Configuration
-import androidx.work.WorkManager
 import cc.adamu.odosync.data.EventLog
 import cc.adamu.odosync.upload.UploadWorker
 
-class OdoSyncApp : Application() {
+class OdoSyncApp : Application(), Configuration.Provider {
+
+    // On-demand WorkManager init (the default initializer is removed in the manifest).
+    override val workManagerConfiguration: Configuration get() = Configuration.Builder().build()
+
     override fun onCreate() {
         super.onCreate()
         EventLog.init(this)
-        WorkManager.initialize(this, Configuration.Builder().build())
         val nm = getSystemService(NotificationManager::class.java)
         // MIN importance: no sound, no heads-up, no status-bar icon, never mirrored to Android Auto.
         nm.createNotificationChannel(
