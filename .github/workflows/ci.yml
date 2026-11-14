@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  test:
+    name: Unit tests + lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v4
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Unit tests (ISO-TP / BMW odometer decoding against real F32/F36 captures)
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Android lint
+        run: ./gradlew --no-daemon :app:lintDebug
+
+      - name: Upload test + lint reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: reports
+          path: |
+            app/build/reports/
+            app/build/test-results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  build:
+    name: Build APK
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub release on v* tags
+    env:
+      KEYSTORE_B64: ${{ secrets.ODOSYNC_KEYSTORE_BASE64 }}
+      ODOSYNC_KEYSTORE_PASSWORD: ${{ secrets.ODOSYNC_KEYSTORE_PASSWORD }}
+      ODOSYNC_KEY_ALIAS: ${{ secrets.ODOSYNC_KEY_ALIAS }}
+      ODOSYNC_VERSION_CODE: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v4
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Version
+        run: |
+          base=$(grep -E '^odosync.version=' gradle.properties | cut -d= -f2)
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ "$version" != "$base" ]]; then
+              echo "::warning::Tag $GITHUB_REF_NAME differs from odosync.version=$base in gradle.properties"
+            fi
+          else
+            version="${base}-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "ODOSYNC_VERSION_NAME=$version" >> "$GITHUB_ENV"
+          echo "Building $version (versionCode $GITHUB_RUN_NUMBER)"
+
+      - name: Release keystore
+        run: |
+          if [[ -n "$KEYSTORE_B64" ]]; then
+            echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ODOSYNC_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "Signing with the release key"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "::error::ODOSYNC_KEYSTORE_BASE64 secret missing - refusing to publish a release signed with a throwaway debug key"
+            exit 1
+          else
+            echo "::warning::No release key available (fork PR or secrets not set) - APK is debug-signed"
+          fi
+
+      - name: Build release APK
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          apk="out/OdoSync-${ODOSYNC_VERSION_NAME}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$apk"
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$bt/apksigner" verify --print-certs "$apk" | grep -E "Signer #1 certificate (DN|SHA-256)"
+          (cd out && sha256sum "$(basename "$apk")" | tee "$(basename "$apk").sha256")
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: OdoSync-${{ env.ODOSYNC_VERSION_NAME }}
+          path: out/
+          retention-days: 30
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          name: OdoSync ${{ github.ref_name }}
+          files: |
+            out/*.apk
+            out/*.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

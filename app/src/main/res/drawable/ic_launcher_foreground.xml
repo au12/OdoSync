@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Odometer gauge with a sync arrow. 108dp adaptive canvas, art kept inside the 72dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- gauge arc -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000"
+        android:pathData="M32,70 A26,26 0 1,1 76,70" />
+    <!-- ticks -->
+    <path
+        android:strokeColor="#9FD3FF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:pathData="M54,32 L54,38 M38,40 L42,44 M70,40 L66,44 M32,56 L38,56 M76,56 L70,56" />
+    <!-- needle -->
+    <path
+        android:strokeColor="#FF6B3D"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,58 L66,44" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,58 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0" />
+    <!-- odometer window -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M40,66 L68,66 A2,2 0 0,1 70,68 L70,76 A2,2 0 0,1 68,78 L40,78 A2,2 0 0,1 38,76 L38,68 A2,2 0 0,1 40,66 Z" />
+    <path
+        android:strokeColor="#1B3A5C"
+        android:strokeWidth="1.6"
+        android:pathData="M45,69 L45,75 M50,69 L50,75 M55,69 L55,75 M60,69 L60,75 M65,69 L65,75" />
+</vector>

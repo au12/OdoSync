@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS everywhere, but allow plain http for a LubeLogger instance reached directly on the
+     LAN (e.g. http://10.0.10.x:8080). User-installed CAs are trusted for self-signed setups. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
