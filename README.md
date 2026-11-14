@@ -115,13 +115,12 @@ trip start/end and upload.
 ```
 
 CI (`.github/workflows/ci.yml`) runs the unit tests and Android lint on every push and pull
-request, then builds a release APK and uploads it as a workflow artifact. Pushing a `v*` tag
-also publishes a GitHub release with the APK and its SHA-256:
+request, then builds a release APK and uploads it as a workflow artifact. To publish a GitHub
+release (APK + SHA-256), bump `odosync.version` in `gradle.properties`, commit, and then either:
 
-```bash
-# bump odosync.version in gradle.properties, commit, then
-git tag v0.1.1 && git push origin v0.1.1
-```
+- **Actions → CI → Run workflow**, entering the version (e.g. `0.1.1`) — CI tests, builds,
+  creates the `v0.1.1` tag on that commit and publishes the release; or
+- push a tag: `git tag v0.1.1 && git push origin v0.1.1`.
 
 `versionName` comes from the tag (`v0.1.0` → `0.1.0`; untagged builds are `0.1.0-dev.<run>`),
 and `versionCode` is the workflow run number, so every CI build installs over the last one.
@@ -129,7 +128,7 @@ and `versionCode` is the workflow run number, so every CI build installs over th
 Release signing reads `ODOSYNC_KEYSTORE`, `ODOSYNC_KEYSTORE_PASSWORD` and `ODOSYNC_KEY_ALIAS`
 from the environment and falls back to the debug key without them. In CI they come from the
 repository secrets `ODOSYNC_KEYSTORE_BASE64` (`base64 -w0 odosync-release.jks`),
-`ODOSYNC_KEYSTORE_PASSWORD` and `ODOSYNC_KEY_ALIAS` (`odosync`). Tag builds refuse to publish
+`ODOSYNC_KEYSTORE_PASSWORD` and `ODOSYNC_KEY_ALIAS` (`odosync`). Release builds refuse to publish
 without the release key, because a debug-signed APK can't be updated by later releases. Never
 commit the keystore (`*.jks` is git-ignored).
 

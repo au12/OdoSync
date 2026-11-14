@@ -6,6 +6,11 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Publish a release with this version (e.g. 0.1.0). Leave empty for a plain build."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
       ODOSYNC_KEYSTORE_PASSWORD: ${{ secrets.ODOSYNC_KEYSTORE_PASSWORD }}
       ODOSYNC_KEY_ALIAS: ${{ secrets.ODOSYNC_KEY_ALIAS }}
       ODOSYNC_VERSION_CODE: ${{ github.run_number }}
+      RELEASE_INPUT: ${{ inputs.release_version }}
     steps:
       - uses: actions/checkout@v7
 
@@ -77,16 +83,29 @@ jobs:
       - name: Version
         run: |
           base=$(grep -E '^odosync.version=' gradle.properties | cut -d= -f2)
+          release=false
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             version="${GITHUB_REF_NAME#v}"
-            if [[ "$version" != "$base" ]]; then
-              echo "::warning::Tag $GITHUB_REF_NAME differs from odosync.version=$base in gradle.properties"
+            release=true
+          elif [[ -n "$RELEASE_INPUT" ]]; then
+            version="${RELEASE_INPUT#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::release_version must look like 0.1.0 (got '$RELEASE_INPUT')"
+              exit 1
             fi
+            release=true
           else
             version="${base}-dev.${GITHUB_RUN_NUMBER}"
           fi
-          echo "ODOSYNC_VERSION_NAME=$version" >> "$GITHUB_ENV"
-          echo "Building $version (versionCode $GITHUB_RUN_NUMBER)"
+          if [[ "$release" == true && "$version" != "$base" ]]; then
+            echo "::warning::Releasing $version but gradle.properties has odosync.version=$base"
+          fi
+          {
+            echo "ODOSYNC_VERSION_NAME=$version"
+            echo "RELEASE=$release"
+            echo "RELEASE_TAG=v$version"
+          } >> "$GITHUB_ENV"
+          echo "Building $version (versionCode $GITHUB_RUN_NUMBER, release=$release)"
 
       - name: Release keystore
         run: |
@@ -94,7 +113,7 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "ODOSYNC_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
             echo "Signing with the release key"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          elif [[ "$RELEASE" == true ]]; then
             echo "::error::ODOSYNC_KEYSTORE_BASE64 secret missing - refusing to publish a release signed with a throwaway debug key"
             exit 1
           else
@@ -119,11 +138,15 @@ jobs:
           path: out/
           retention-days: 30
 
+      # On a pushed v* tag this releases that tag. From "Run workflow" with a version it creates
+      # the tag at this commit (tags made with GITHUB_TOKEN don't start a second run).
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE == 'true'
         uses: softprops/action-gh-release@v3
         with:
-          name: OdoSync ${{ github.ref_name }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: OdoSync ${{ env.RELEASE_TAG }}
           files: |
             out/*.apk
             out/*.sha256
