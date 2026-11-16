@@ -11,8 +11,10 @@ import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
 import android.os.Build
 import cc.adamu.odosync.data.EventLog
+import cc.adamu.odosync.link.ObdLink
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -24,26 +26,30 @@ import java.util.UUID
 
 /**
  * A "serial port" over BLE GATT for ELM327-style dongles (Veepeak OBDCheck BLE advertises as
- * "VEEPEAK" and exposes service FFF0 with notify FFF1 / write FFF2; other common layouts are
- * auto-detected).
+ * "VEEPEAK" and exposes service FFF0 with notify FFF1 / write FFF2; the WiCAN Pro's FEE0/FEE1
+ * and other common layouts are auto-detected).
  *
- * Coexistence with wireless Android Auto: we never bond, never scan, never raise the
- * connection priority (LOW_POWER = ~100 ms connection interval), and only exchange a few
- * dozen bytes per minute. The phone's classic Bluetooth (HFP calls) and Wi-Fi (AA projection)
- * are untouched.
+ * Coexistence with wireless Android Auto: we never bond the Veepeak, never scan, and run at
+ * LOW_POWER (~100 ms connection interval). Engine-health sampling asks for BALANCED (~30-50 ms)
+ * only while the engine is under boost, then drops back. Traffic stays in the low kB/s even
+ * then. The phone's classic Bluetooth (HFP calls) and Wi-Fi (AA projection) are untouched.
  */
 @SuppressLint("MissingPermission")
-class BleSerial(private val context: Context, private val device: BluetoothDevice) {
+class BleSerial(private val context: Context, private val device: BluetoothDevice) : ObdLink {
+
+    override val label: String get() = "BLE ${device.address}"
 
     @Volatile private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
     private val _connected = MutableStateFlow(false)
-    val connected: StateFlow<Boolean> = _connected.asStateFlow()
+    override val connected: StateFlow<Boolean> = _connected.asStateFlow()
 
     /** Raw notification payloads from the dongle. */
-    val incoming = Channel<ByteArray>(Channel.UNLIMITED)
+    private val rx = Channel<ByteArray>(Channel.UNLIMITED)
+    override val incoming: ReceiveChannel<ByteArray> get() = rx
+    @Volatile private var fast = false
 
     private var connectResult: CompletableDeferred<Boolean>? = null
     private var pendingWrite: CompletableDeferred<Boolean>? = null
@@ -119,23 +125,39 @@ class BleSerial(private val context: Context, private val device: BluetoothDevic
         }
 
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic, value: ByteArray) {
-            incoming.trySend(value.copyOf())
+            rx.trySend(value.copyOf())
         }
 
         @Deprecated("Pre-API 33 path")
         @Suppress("OVERRIDE_DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, c: BluetoothGattCharacteristic) {
             @Suppress("DEPRECATION")
-            c.value?.let { incoming.trySend(it.copyOf()) }
+            c.value?.let { rx.trySend(it.copyOf()) }
         }
     }
 
     private fun finishSetup(g: BluetoothGatt) {
         // Lowest-duty link: ~100-125 ms interval. Plenty for a few ELM commands per minute and
         // the least possible airtime next to Android Auto's Bluetooth/Wi-Fi traffic.
+        fast = false
         g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
         _connected.value = true
         connectResult?.complete(true)
+    }
+
+    /**
+     * BALANCED (~30-50 ms interval) roughly halves the time per ELM request, which is what lets
+     * the engine-health sampler read all six cylinders a couple of times a second under boost.
+     * Only used while sampling fast; the idle and cruise link stays at LOW_POWER.
+     */
+    override fun setFastMode(fast: Boolean) {
+        if (this.fast == fast) return
+        val g = gatt ?: return
+        this.fast = fast
+        runCatching {
+            g.requestConnectionPriority(
+                if (fast) BluetoothGatt.CONNECTION_PRIORITY_BALANCED else BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
+        }
     }
 
     /**
@@ -153,7 +175,7 @@ class BleSerial(private val context: Context, private val device: BluetoothDevic
         return ok
     }
 
-    suspend fun write(text: String): Boolean = writeMutex.withLock {
+    override suspend fun write(text: String): Boolean = writeMutex.withLock {
         val g = gatt ?: return false
         val c = writeChar ?: return false
         val bytes = text.toByteArray(Charsets.US_ASCII)
@@ -178,11 +200,11 @@ class BleSerial(private val context: Context, private val device: BluetoothDevic
         true
     }
 
-    fun drain() {
-        while (incoming.tryReceive().isSuccess) { /* discard */ }
+    override fun drain() {
+        while (rx.tryReceive().isSuccess) { /* discard */ }
     }
 
-    fun close() {
+    override fun close() {
         val g = gatt
         gatt = null
         writeChar = null
@@ -224,6 +246,9 @@ class BleSerial(private val context: Context, private val device: BluetoothDevic
             Triple(0xFFF0, 0xFFF1, 0xFFF2), // Veepeak OBDCheck BLE, OBDLink CX, many ELM327 BLE
             Triple(0xFFE0, 0xFFE1, 0xFFE1), // HM-10 style clones
             Triple(0x18F0, 0x2AF0, 0x2AF1), // Vgate iCar Pro BLE
+            // WiCAN / WiCAN Pro (BLE must be enabled in its web UI). Its characteristic needs an
+            // encrypted link, so Android asks once for the passkey set there (default 123456).
+            Triple(0xFEE0, 0xFEE1, 0xFEE1),
         )
         fun uuid16(v: Int): UUID = UUID.fromString("0000%04x-0000-1000-8000-00805f9b34fb".format(v))
         private fun short(u: UUID) = u.toString().substring(4, 8).uppercase()

@@ -95,6 +95,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     testImplementation("junit:junit:4.13.2")
+    // Real org.json on the JVM (android.jar only has stubs): drive summaries, HA payloads, DME profile.
+    testImplementation("org.json:json:20260814")
     // Screen smoke tests: render every screen on the JVM (Robolectric native graphics) and save PNGs.
     testImplementation("org.robolectric:robolectric:4.16.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")

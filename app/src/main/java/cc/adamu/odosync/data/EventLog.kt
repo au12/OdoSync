@@ -41,7 +41,7 @@ object EventLog {
     @Synchronized
     fun log(msg: String) {
         val line = "${fmt.format(Date())}  $msg"
-        Log.i("OdoSync", msg)
+        runCatching { Log.i("OdoSync", msg) } // stubbed out in plain JVM unit tests
         lines.addLast(line)
         while (lines.size > MAX_LINES) lines.removeFirst()
         _flow.value = lines.toList()

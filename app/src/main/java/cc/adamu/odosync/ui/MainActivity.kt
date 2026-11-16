@@ -1,6 +1,7 @@
 package cc.adamu.odosync.ui
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DeleteSweep
 import androidx.compose.material.icons.outlined.History
+import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.Speed
@@ -32,6 +34,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -60,6 +63,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         pairing = DonglePairing(this)
+        requestedTab.value = intent?.getStringExtra(EXTRA_TAB)
         refreshPermissions()
         setContent { OdoSyncTheme { Root(this) } }
         if (!permissionsGranted.value) requestPermissions() else maybeStartService("app opened")
@@ -86,14 +90,27 @@ class MainActivity : ComponentActivity() {
 
     /** Opening the app connects to the dongle if it's paired, so you can watch it work. */
     fun maybeStartService(reason: String) {
-        if (Settings.get(this).current.dongleMac != null && !LiveStatus.current.serviceRunning) {
+        if (Settings.get(this).current.adapterConfigured && !LiveStatus.current.serviceRunning) {
             TripService.start(this, reason)
         }
+    }
+
+    /** Tab requested by a notification ("health"), consumed once. */
+    val requestedTab = mutableStateOf<String?>(null)
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        intent.getStringExtra(EXTRA_TAB)?.let { requestedTab.value = it }
+    }
+
+    companion object {
+        const val EXTRA_TAB = "tab"
     }
 }
 
 private enum class Tab(val label: String, val icon: ImageVector) {
     DASHBOARD("Dashboard", Icons.Outlined.Speed),
+    HEALTH("Health", Icons.Outlined.MonitorHeart),
     ACTIVITY("Activity", Icons.Outlined.History),
     SETTINGS("Settings", Icons.Outlined.Settings),
 }
@@ -103,6 +120,11 @@ private enum class Tab(val label: String, val icon: ImageVector) {
 private fun Root(activity: MainActivity) {
     var tab by rememberSaveable { mutableStateOf(Tab.DASHBOARD) }
     val ctx = LocalContext.current
+    val requested by activity.requestedTab
+    LaunchedEffect(requested) {
+        if (requested == "health") tab = Tab.HEALTH
+        if (requested != null) activity.requestedTab.value = null
+    }
     val settings by Settings.get(ctx).flow.collectAsStateWithLifecycle()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -143,6 +165,7 @@ private fun Root(activity: MainActivity) {
         Box(Modifier.fillMaxSize().padding(pad)) {
             when (tab) {
                 Tab.DASHBOARD -> DashboardScreen(activity, onOpenSettings = { tab = Tab.SETTINGS })
+                Tab.HEALTH -> HealthScreen(onOpenSettings = { tab = Tab.SETTINGS })
                 Tab.ACTIVITY -> ActivityScreen()
                 Tab.SETTINGS -> SettingsScreen(activity)
             }

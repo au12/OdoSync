@@ -20,6 +20,14 @@ import cc.adamu.odosync.data.Settings
 import cc.adamu.odosync.data.Status
 import cc.adamu.odosync.data.TripPhase
 import cc.adamu.odosync.data.TripStore
+import cc.adamu.odosync.diag.DiagStore
+import cc.adamu.odosync.diag.HealthAlert
+import cc.adamu.odosync.diag.LiveDiag
+import cc.adamu.odosync.diag.LiveHealth
+import cc.adamu.odosync.diag.PullEvent
+import cc.adamu.odosync.diag.Severity
+import cc.adamu.odosync.diag.Sig
+import cc.adamu.odosync.diag.TripSummary
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -109,6 +117,8 @@ class ScreensTest {
                 tripSince = now - 23 * 60_000, tripStartKm = 98_531, engineRpm = 1850, lastPollAt = now)
         }
 
+        seedHealth(now)
+
         EventLog.init(app)
         EventLog.clear()
         listOf(
@@ -128,6 +138,47 @@ class ScreensTest {
     @After
     fun stop() {
         server.close()
+        LiveDiag.reset()
+    }
+
+    /** Three weeks of drives: a quiet baseline, then cylinder 5 starting to pull more often. */
+    private fun seedHealth(now: Long) {
+        val store = DiagStore.get(app)
+        val day = 86_400_000L
+        // Anchored to the hour so every test seeds the same drives (the store is a process-wide
+        // singleton and upserts by start time) instead of piling up near-duplicates.
+        val now = now - now % 3_600_000
+        val rates = listOf(0.3, 0.0, 0.5, 0.2, 0.4, 0.0, 0.3, 0.5, 0.2, 0.3, 0.8, 1.1, 0.9, 1.2)
+        rates.forEachIndexed { i, r ->
+            val start = now - (rates.size - i) * day - 3_600_000
+            val boostS = 140.0 + (i % 4) * 45
+            val pulls = (r * boostS / 60).toInt()
+            val cyl5 = if (i >= 10) pulls - pulls / 3 else pulls / 2
+            val last = i == rates.lastIndex
+            store.upsert(TripSummary(
+                startedAt = start, endedAt = start + 31 * 60_000, startKm = 97_900L + i * 45, endKm = 97_930L + i * 45,
+                boostSeconds = boostS, boostEpisodes = 6 + i % 5, peakBoostKpa = 118.0 + i % 3, peakTargetKpa = 120.5,
+                meanBoostDevKpa = -1.8, timingFramesInBoost = (boostS * 2.4).toInt(), pullEvents = pulls,
+                maxPullDeg = if (pulls > 0) 1.7 + (i % 4) * 0.3 else 0.0, maxPullCylinder = if (pulls > 0) 5 else null,
+                perCylEvents = listOf(0, (pulls - cyl5) / 2, pulls - cyl5 - (pulls - cyl5) / 2, 0, cyl5, 0),
+                perCylMaxPull = listOf(0.0, 1.6, 1.6, 0.0, 1.7 + (i % 4) * 0.3, 0.0),
+                cylindersMonitored = listOf(1, 2, 3, 4, 5, 6),
+                events = if (pulls > 0) listOf(PullEvent(642.0, listOf(5), 2.6, 117.0, 39.0, 104.0, 104.0)) else emptyList(),
+                iatMaxC = 38.0 + i % 6, iatMaxInBoostC = 38.0 + i % 6, iatRiseMaxC = 9.0 + i % 4,
+                oilMaxC = 103.0 + i % 5, coolantMaxC = 97.0 + i % 3,
+                railMinInBoostBar = 141.0, lowFuelMinInBoostBar = 5.7, lambdaMinInBoost = 0.84, lambdaMaxInBoost = 1.0,
+                misfires = List(6) { 0 },
+                alerts = if (last) listOf(HealthAlert("pull_creep", Severity.WATCH, "Timing pulls creeping up",
+                    "Over your last 5 boosted drives the pull rate rose to 1.0 per minute in boost, from 0.3 on the 10 before. " +
+                        "Fuel quality, heat and plugs are the usual causes.")) else emptyList(),
+            ))
+        }
+        LiveDiag.update {
+            LiveHealth(active = true, inBoost = true, fast = true, pollsPerSecond = 9.4,
+                values = mapOf(Sig.BOOST to 214.0, Sig.BOOST_TARGET to 217.5, Sig.BARO to 99.6, Sig.IAT to 41.0,
+                    Sig.OIL to 104.0, Sig.COOLANT to 98.0),
+                pullNow = listOf(0.0, 0.2, 0.0, 0.1, 2.1, 0.0), pullEvents = 2, maxPullDeg = 2.4, boostSeconds = 96.0)
+        }
     }
 
     @Test fun dashboardLight() = shoot("dashboard-light")
@@ -135,6 +186,10 @@ class ScreensTest {
     @Test @Config(qualifiers = "+night") fun dashboardDark() = shoot("dashboard-dark")
 
     @Test fun activity() = shoot("activity", tab = "Activity")
+
+    @Test fun health() = shoot("health", tab = "Health")
+
+    @Test @Config(qualifiers = "+night") fun healthDark() = shoot("health-dark", tab = "Health")
 
     @Test fun settings() = shoot("settings", tab = "Settings", waitFor = "Connected · 2 vehicles")
 

@@ -34,7 +34,7 @@ sealed interface RpmResult {
  * All reads are UDS ReadDataByIdentifier in the default session: read-only, no security
  * access, nothing written to the car.
  */
-class CarReader(private val elm: Elm327) {
+class CarReader(val elm: Elm327) {
 
     /** Called when the BMW frame variant that works for this car has been found. */
     var onFrameVariantLearned: ((Boolean) -> Unit)? = null
@@ -52,10 +52,19 @@ class CarReader(private val elm: Elm327) {
         Source("OBD-A6") { stdA6() },
     )
 
-    suspend fun readDid(ecu: Int, did: Int): DidResult {
+    suspend fun readDid(ecu: Int, did: Int): DidResult = readDids(ecu, listOf(did))
+
+    /**
+     * UDS ReadDataByIdentifier for one or more DIDs in a single request (the reply carries each
+     * DID followed by its data; see [cc.adamu.odosync.diag.DmeSignals.split]). A plain ELM327 can
+     * only send single-frame requests, so at most two DIDs fit (see [Elm327.maxRequestBytes]).
+     */
+    suspend fun readDids(ecu: Int, dids: List<Int>, timeoutMs: Long = 4000): DidResult {
+        require(dids.isNotEmpty() && 1 + dids.size * 2 <= elm.maxRequestBytes) { "too many DIDs: $dids" }
         if (!elm.ensureBmw(ecu)) return DidResult.Error("adapter rejected BMW addressing")
+        val cmd = "22" + dids.joinToString("") { "%04X".format(it) }
         repeat(2) { attempt ->
-            val resp = elm.send("22%04X".format(did), 4000) ?: return DidResult.Error("adapter timeout")
+            val resp = elm.send(cmd, timeoutMs) ?: return DidResult.Error("adapter timeout")
             val frames = CanFrames.parse(resp)
             val msgs = CanFrames.reassemble(frames, 0x600 + ecu, extendedAddressing = true)
             val real = msgs.lastOrNull { !(it.size >= 3 && it[0] == 0x7F && it[2] == 0x78) }

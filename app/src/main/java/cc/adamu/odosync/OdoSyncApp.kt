@@ -33,11 +33,19 @@ class OdoSyncApp : Application(), Configuration.Provider {
                 enableVibration(false)
             }
         )
+        // Engine-health findings, posted once the drive has ended (never mid-drive).
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_HEALTH, "Engine health", NotificationManager.IMPORTANCE_DEFAULT).apply {
+                description = "Timing pulls, boost and temperature findings after a drive"
+                setShowBadge(true)
+            }
+        )
         UploadWorker.schedulePeriodic(this)
     }
 
     companion object {
         const val CHANNEL_SERVICE = "trip"
         const val CHANNEL_ALERTS = "alerts"
+        const val CHANNEL_HEALTH = "health"
     }
 }

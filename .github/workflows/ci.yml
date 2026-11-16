@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, diagnostics]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -105,6 +105,9 @@ jobs:
             # odosync.version in gradle.properties was bumped and has no release yet: publish it.
             version="$base"
             release=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/* && "$GITHUB_REF_NAME" != main ]]; then
+            # Branch builds say which branch they came from, e.g. 0.1.1-diagnostics.57.
+            version="${base}-${GITHUB_REF_NAME//[^A-Za-z0-9]/-}.${GITHUB_RUN_NUMBER}"
           else
             version="${base}-dev.${GITHUB_RUN_NUMBER}"
           fi

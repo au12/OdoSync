@@ -82,6 +82,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- Shares a drive's CSV data log from the Health tab. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <!-- We initialise WorkManager ourselves. -->
         <provider
             android:name="androidx.startup.InitializationProvider"

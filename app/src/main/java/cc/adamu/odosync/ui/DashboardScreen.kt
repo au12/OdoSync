@@ -105,7 +105,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
                 Spacer(Modifier.size(16.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(
-                        enabled = s.dongleMac != null && perms,
+                        enabled = s.adapterConfigured && (perms || !s.adapterKind.isBle),
                         onClick = { TripService.send(ctx, TripService.ACTION_READ_NOW) },
                         contentPadding = ButtonDefaults.ButtonWithIconContentPadding,
                     ) {
@@ -130,7 +130,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
         val steps = listOf(
             "Allow Nearby devices" to perms,
             "Connect LubeLogger and pick the car" to s.lubeLoggerConfigured,
-            "Pair the OBD dongle" to (s.dongleMac != null),
+            "Pair the OBD dongle" to s.adapterConfigured,
             "Choose the car's Bluetooth (recommended)" to s.carBtMacs.isNotEmpty(),
         )
         if (steps.any { !it.second }) {
@@ -160,7 +160,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
         // ---------------------------------------------------------------- car link
         Section("Car link", icon = Icons.Outlined.Link) {
             val (dongleText, dongleTone) = when {
-                s.dongleMac == null -> "Not paired" to Tone.IDLE
+                !s.adapterConfigured -> "Not paired" to Tone.IDLE
                 live.dongle == DongleState.CONNECTED -> "Connected" to Tone.GOOD
                 live.dongle == DongleState.ERROR -> "Problem" to Tone.BAD
                 live.dongle in listOf(DongleState.CONNECTING, DongleState.WAITING, DongleState.INITIALISING) ->
@@ -193,7 +193,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
                 if (live.serviceRunning) {
                     TextButton(onClick = { TripService.send(ctx, TripService.ACTION_STOP) }) { Text("Release") }
                 } else {
-                    TextButton(enabled = s.dongleMac != null && perms,
+                    TextButton(enabled = s.adapterConfigured && (perms || !s.adapterKind.isBle),
                         onClick = { TripService.start(ctx, "manual connect") }) { Text("Connect") }
                 }
             }

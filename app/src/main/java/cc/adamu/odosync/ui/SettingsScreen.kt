@@ -25,9 +25,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bluetooth
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudUpload
+import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.ExpandLess
 import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Route
 import androidx.compose.material.icons.outlined.Sensors
 import androidx.compose.material.icons.outlined.Speed
@@ -50,6 +53,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -70,9 +74,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cc.adamu.odosync.BuildConfig
 import cc.adamu.odosync.data.AuthMode
 import cc.adamu.odosync.data.EventLog
+import cc.adamu.odosync.data.NoteMode
 import cc.adamu.odosync.data.Settings
 import cc.adamu.odosync.data.TripStore
 import cc.adamu.odosync.data.UploadUnit
+import cc.adamu.odosync.diag.DiagStore
+import cc.adamu.odosync.diag.Units
+import cc.adamu.odosync.link.AdapterKind
+import cc.adamu.odosync.upload.HomeAssistantClient
 import cc.adamu.odosync.upload.LubeLoggerClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -94,6 +103,9 @@ fun SettingsScreen(activity: MainActivity) {
         DongleSection(activity, perms)
         TripDetectionSection(store, perms)
         OdometerSection(store, trips)
+        EngineHealthSection(store)
+        DriveNotesSection(store)
+        HomeAssistantSection(store)
         AdvancedSection(activity, store, perms)
         Column(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Hint("OdoSync ${BuildConfig.VERSION_NAME}")
@@ -232,10 +244,29 @@ private fun DongleSection(activity: MainActivity, perms: Boolean) {
     val ctx = LocalContext.current
     val store = Settings.get(ctx)
     val s by store.flow.collectAsStateWithLifecycle()
-    Section("OBD dongle", icon = Icons.Outlined.Sensors, subtitle = "Veepeak OBDCheck BLE in the driver's footwell") {
-        if (s.dongleMac == null) {
+    Section("OBD dongle", icon = Icons.Outlined.Sensors, subtitle = "${s.adapterKind.label} in the driver's footwell") {
+        SelectField(
+            label = "Adapter", value = s.adapterKind.label,
+            options = AdapterKind.entries.toList(), optionLabel = { it.label },
+        ) { k -> store.update { putString("adapterKind", k.name) } }
+        if (!s.adapterKind.isBle) {
+            OutlinedTextField(
+                value = s.wifiHost, onValueChange = { v -> store.update { putString("wifiHost", v.trim()) } },
+                label = { Text("WiCAN address") }, placeholder = { Text("192.168.0.10 or wican_….local") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+            IntField("Port", s.wifiPort, "ELM327 port (WiCAN Pro: 35000)", Modifier.fillMaxWidth()) {
+                if (it in 1..65535) store.update { putInt("wifiPort", it) }
+            }
+            Hint("Set the WiCAN Pro's protocol to ELM327. Wireless Android Auto keeps your phone's Wi-Fi " +
+                "on the car, so over Wi-Fi OdoSync only reaches the WiCAN when the phone shares its network " +
+                "(parked at home, or no wireless AA). For driving with wireless AA, use the WiCAN Pro's Bluetooth LE.")
+        } else if (s.dongleMac == null) {
             Hint("Plug the dongle in and switch the ignition on, then pair. Don't pair it in Android's " +
-                "Bluetooth settings - OdoSync talks to it over Bluetooth LE directly.")
+                "Bluetooth settings - OdoSync talks to it over Bluetooth LE directly." +
+                if (s.adapterKind == AdapterKind.WICAN_PRO_BLE) " Turn BLE on in the WiCAN's web UI first; Android " +
+                    "asks once for the BLE passkey set there." else "")
             Button(enabled = perms, onClick = { activity.pairing.start() }) { Text("Pair dongle") }
             if (!perms) Hint("Needs the Nearby devices permission first.")
         } else {
@@ -339,6 +370,174 @@ private fun OdometerSection(store: Settings, trips: TripStore) {
     }
 }
 
+// ------------------------------------------------------------------- Engine health
+
+@Composable
+private fun EngineHealthSection(store: Settings) {
+    val ctx = LocalContext.current
+    val s by store.flow.collectAsStateWithLifecycle()
+    var open by rememberSaveable { mutableStateOf(false) }
+    Section("Engine health", icon = Icons.Outlined.MonitorHeart, subtitle = "Timing pulls, boost and temperatures from the DME") {
+        SwitchRow("Monitor the engine", "Read the DME during every drive (read-only)", s.healthEnabled) {
+            store.update { putBoolean("healthEnabled", it) }
+        }
+        SwitchRow("Fast sampling under boost", "All six cylinders a few times a second while in boost", s.healthFastSampling) {
+            store.update { putBoolean("healthFastSampling", it) }
+        }
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            Units.entries.forEachIndexed { i, u ->
+                SegmentedButton(
+                    selected = s.healthUnits == u,
+                    onClick = { store.update { putString("healthUnits", u.name) } },
+                    shape = SegmentedButtonDefaults.itemShape(i, Units.entries.size),
+                ) { Text(u.label) }
+            }
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        Row(Modifier.fillMaxWidth().clickable { open = !open }, verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Alert thresholds", style = MaterialTheme.typography.bodyLarge)
+                Hint("What counts as a pull, and when to raise an alert")
+            }
+            Icon(if (open) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore, null)
+        }
+        AnimatedVisibility(open) {
+            val t = s.thresholds
+            val u = s.healthUnits
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    DecimalField("Pull starts at", t.pullEventDeg, "degrees behind", Modifier.weight(1f)) {
+                        if (it in 0.5..5.0) store.update { putFloat("thPullEventDeg", it.toFloat()) }
+                    }
+                    DecimalField("Alert on a pull of", t.severePullDeg, "degrees", Modifier.weight(1f)) {
+                        if (it in 1.0..12.0) store.update { putFloat("thSeverePullDeg", it.toFloat()) }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    DecimalField("Underboost", u.pressure(t.underboostKpa), "${u.pressureUnit} under target", Modifier.weight(1f)) {
+                        val kpa = if (u == Units.US) it / Units.KPA_TO_PSI else it * 100
+                        if (kpa in 3.0..80.0) store.update { putFloat("thUnderboostKpa", kpa.toFloat()) }
+                    }
+                    DecimalField("Overboost", u.pressure(t.overboostKpa), "${u.pressureUnit} over target", Modifier.weight(1f)) {
+                        val kpa = if (u == Units.US) it / Units.KPA_TO_PSI else it * 100
+                        if (kpa in 3.0..80.0) store.update { putFloat("thOverboostKpa", kpa.toFloat()) }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    DecimalField("Oil alert", u.temp(t.oilAlertC), u.tempUnit, Modifier.weight(1f)) {
+                        val c = if (u == Units.US) (it - 32) * 5 / 9 else it
+                        if (c in 90.0..170.0) store.update { putFloat("thOilAlertC", c.toFloat()) }
+                    }
+                    DecimalField("Intake air alert", u.temp(t.iatAlertC), "${u.tempUnit} under boost", Modifier.weight(1f)) {
+                        val c = if (u == Units.US) (it - 32) * 5 / 9 else it
+                        if (c in 30.0..120.0) store.update { putFloat("thIatAlertC", c.toFloat()) }
+                    }
+                }
+                TextButton(onClick = {
+                    store.update {
+                        listOf("thPullEventDeg", "thSeverePullDeg", "thUnderboostKpa", "thOverboostKpa", "thOilAlertC", "thIatAlertC")
+                            .forEach { k -> remove(k) }
+                    }
+                }) { Text("Reset to defaults") }
+            }
+        }
+        OutlinedButton(onClick = {
+            DiagStore.get(ctx).profile = null
+            EventLog.log("Engine health: will re-learn the DME on the next drive")
+        }) { Text("Re-learn DME signals") }
+    }
+}
+
+// ------------------------------------------------------------------- Drive notes (LubeLogger / Glovebox)
+
+@Composable
+private fun DriveNotesSection(store: Settings) {
+    val s by store.flow.collectAsStateWithLifecycle()
+    Section("Drive notes", icon = Icons.Outlined.EditNote, subtitle = "Drive summaries in LubeLogger / Glovebox") {
+        SwitchRow("Write drive notes", "Uses the LubeLogger connection above", s.notesEnabled) {
+            store.update { putBoolean("notesEnabled", it) }
+        }
+        if (s.notesEnabled) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                NoteMode.entries.forEachIndexed { i, m ->
+                    SegmentedButton(
+                        selected = s.noteMode == m,
+                        onClick = { store.update { putString("noteMode", m.name) } },
+                        shape = SegmentedButtonDefaults.itemShape(i, NoteMode.entries.size),
+                    ) { Text(if (m == NoteMode.DAILY) "Per day" else "Per drive") }
+                }
+            }
+            SwitchRow("Pinned health note", "One note with the status and recent drives, kept up to date", s.healthNote) {
+                store.update { putBoolean("healthNote", it) }
+            }
+            SwitchRow("Attach data logs", "Each drive's CSV log (opens in Glovebox's viewer)", s.attachLogs) {
+                store.update { putBoolean("attachLogs", it) }
+            }
+            if (!s.lubeLoggerConfigured) Hint("Connect LubeLogger and pick the car first.")
+        }
+    }
+}
+
+// ------------------------------------------------------------------- Home Assistant
+
+@Composable
+private fun HomeAssistantSection(store: Settings) {
+    val s by store.flow.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    var testState by remember { mutableStateOf<TestState>(TestState.Idle) }
+    var showSecret by remember { mutableStateOf(false) }
+    Section("Home Assistant", icon = Icons.Outlined.Home, subtitle = "Sensors and alert events after each drive") {
+        SwitchRow("Send to Home Assistant", "sensor.${s.haEntityPrefix}_* and odosync_engine_alert", s.haEnabled) {
+            store.update { putBoolean("haEnabled", it) }
+        }
+        if (s.haEnabled) {
+            OutlinedTextField(
+                value = s.haUrl, onValueChange = { v -> store.update { putString("haUrl", v.trim()) } },
+                label = { Text("Home Assistant URL") }, placeholder = { Text("https://ha.example.com") },
+                singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+            )
+            OutlinedTextField(
+                value = s.haToken, onValueChange = { v -> store.update { putString("haToken", v.trim()) } },
+                label = { Text("Long-lived access token") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                visualTransformation = if (showSecret) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { showSecret = !showSecret }) {
+                        Icon(if (showSecret) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
+                            if (showSecret) "Hide" else "Show")
+                    }
+                },
+                supportingText = { Text("Your profile → Security → Long-lived access tokens") },
+            )
+            OutlinedTextField(
+                value = s.haPrefix, onValueChange = { v -> store.update { putString("haPrefix", v.trim()) } },
+                label = { Text("Entity prefix") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                supportingText = { Text("sensor.${s.haEntityPrefix}_engine_health, …") },
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                FilledTonalButton(enabled = testState != TestState.Running && s.homeAssistantConfigured, onClick = {
+                    testState = TestState.Running
+                    scope.launch {
+                        testState = try {
+                            val msg = withContext(Dispatchers.IO) { HomeAssistantClient(store.current.haUrl, store.current.haToken).ping() }
+                            TestState.Ok(msg)
+                        } catch (e: Exception) {
+                            TestState.Failed(e.message ?: e.javaClass.simpleName)
+                        }
+                    }
+                }) { Text("Test") }
+                Spacer(Modifier.width(12.dp))
+                when (val t = testState) {
+                    TestState.Running -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    is TestState.Ok -> ResultLabel(t.msg, ok = true)
+                    is TestState.Failed -> ResultLabel(t.msg, ok = false)
+                    TestState.Idle -> Unit
+                }
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------- Advanced
 
 @Composable
@@ -398,6 +597,19 @@ private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChang
         Spacer(Modifier.width(12.dp))
         Switch(checked = checked, onCheckedChange = onChange)
     }
+}
+
+@Composable
+private fun DecimalField(label: String, value: Double, help: String, modifier: Modifier, onChange: (Double) -> Unit) {
+    val shown = String.format(java.util.Locale.US, "%.1f", value)
+    var text by remember(shown) { mutableStateOf(shown) }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { t -> text = t; t.replace(',', '.').toDoubleOrNull()?.let(onChange) },
+        label = { Text(label) }, singleLine = true, modifier = modifier,
+        supportingText = { Text(help) },
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+    )
 }
 
 @Composable

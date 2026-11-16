@@ -1,7 +1,7 @@
 package cc.adamu.odosync.obd
 
-import cc.adamu.odosync.ble.BleSerial
 import cc.adamu.odosync.data.EventLog
+import cc.adamu.odosync.link.ObdLink
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -10,8 +10,12 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    every odometer answer is a multi-frame ISO-TP message).
  *  - STD: plain OBD-II to the DME on 7E0/7E8 (engine RPM, PID A6 fallback).
  * ATRV (adapter voltage) never touches the CAN bus, so it is safe to call while the car sleeps.
+ *
+ * Read-only by construction: anything that would reach the car's bus must be a UDS
+ * ReadDataByIdentifier (22) or an OBD-II mode 01 request; everything else is refused before it
+ * leaves the phone (see [requireReadOnly]).
  */
-class Elm327(private val serial: BleSerial) {
+class Elm327(private val serial: ObdLink) {
 
     var version: String = ""
         private set
@@ -32,8 +36,16 @@ class Elm327(private val serial: BleSerial) {
     var bmwVariableDlc: Boolean = false
         set(v) { if (field != v) { field = v; mode = Mode.Unknown } }
 
+    /**
+     * Payload bytes a request may carry. A plain ELM327 only transmits single CAN frames, and
+     * BMW extended addressing spends one byte on the target address, which leaves 6: room for
+     * "22" plus two DIDs.
+     */
+    val maxRequestBytes: Int get() = 6
+
     /** Send one command and return everything up to the '>' prompt, or null on timeout/link loss. */
     suspend fun send(cmd: String, timeoutMs: Long = 3000): String? {
+        requireReadOnly(cmd)
         serial.drain()
         if (!serial.write(cmd + "\r")) return null
         val sb = StringBuilder()
@@ -73,11 +85,20 @@ class Elm327(private val serial: BleSerial) {
 
     suspend fun voltage(): Float? = send("ATRV", 2000)?.let(Decoders::voltage)
 
+    /**
+     * Point requests at BMW ECU [ecu]. Switching from one BMW ECU to another (cluster for the
+     * odometer, engine for health data) only changes the receive filter, extended address and
+     * flow-control address: three commands instead of the full seven.
+     */
     suspend fun ensureBmw(ecu: Int): Boolean {
-        if (mode == Mode.Bmw(ecu)) return true
+        val current = mode
+        if (current == Mode.Bmw(ecu)) return true
         val e = "%02X".format(ecu)
-        val proto = if (bmwVariableDlc) "ATSPB" else "ATSP6"
-        val cmds = listOf(proto, "ATSH6F1", "ATCRA6$e", "ATCEA$e", "ATFCSH6F1", "ATFCSD${e}300000", "ATFCSM1")
+        val ecuSpecific = listOf("ATCRA6$e", "ATCEA$e", "ATFCSD${e}300000")
+        val cmds = if (current is Mode.Bmw) ecuSpecific else {
+            val proto = if (bmwVariableDlc) "ATSPB" else "ATSP6"
+            listOf(proto, "ATSH6F1") + ecuSpecific.take(2) + listOf("ATFCSH6F1", ecuSpecific[2], "ATFCSM1")
+        }
         for (c in cmds) {
             val r = send(c)
             if (r == null || !r.contains("OK")) {
@@ -109,4 +130,20 @@ class Elm327(private val serial: BleSerial) {
     }
 
     private fun String.clean() = replace("\r", " ").replace("\n", " ").trim()
+
+    companion object {
+        /**
+         * Service IDs allowed onto the car's bus: 0x22 ReadDataByIdentifier and OBD-II mode 01.
+         * Nothing that writes, resets, codes or changes sessions can be sent, whatever a future
+         * caller asks for.
+         */
+        private val READ_ONLY_SERVICES = setOf("22", "01")
+
+        fun requireReadOnly(cmd: String) {
+            val c = cmd.trim().uppercase()
+            if (c.startsWith("AT")) return
+            val sid = c.replace(" ", "").take(2)
+            require(sid in READ_ONLY_SERVICES) { "Refusing to send '$cmd': only read requests (22, 01) are allowed" }
+        }
+    }
 }

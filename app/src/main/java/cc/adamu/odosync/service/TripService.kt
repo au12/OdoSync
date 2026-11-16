@@ -26,6 +26,9 @@ import cc.adamu.odosync.data.Settings
 import cc.adamu.odosync.data.Status
 import cc.adamu.odosync.data.TripPhase
 import cc.adamu.odosync.data.TripStore
+import cc.adamu.odosync.diag.DiagSession
+import cc.adamu.odosync.link.ObdLink
+import cc.adamu.odosync.link.TcpLink
 import cc.adamu.odosync.obd.CarReader
 import cc.adamu.odosync.obd.Elm327
 import cc.adamu.odosync.obd.OdoResult
@@ -50,9 +53,11 @@ import java.text.NumberFormat
  *     (ATRV - no CAN traffic, so a parked car is never kept awake).
  *  3. A trip starts when Android Auto is projecting, the car's Bluetooth is linked, or the
  *     voltage jumps above the charging threshold - and the instrument cluster answers.
- *  4. During the trip the odometer is read once a minute (one tiny request).
+ *  4. During the trip the odometer is read once a minute (one tiny request). With engine health
+ *     on, the time in between goes to sampling the DME ([DiagSession]).
  *  5. The trip ends when Android Auto/car Bluetooth drop and the engine is off, or the car stops
- *     answering. The last reading is queued for upload to LubeLogger (WorkManager, needs network).
+ *     answering. The last reading is queued for upload to LubeLogger (WorkManager, needs network),
+ *     and the drive's engine-health summary is saved and queued for Glovebox/Home Assistant.
  */
 class TripService : LifecycleService() {
 
@@ -94,7 +99,8 @@ class TripService : LifecycleService() {
     @Volatile private var stopping = false
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private var loop: Job? = null
-    private var serial: BleSerial? = null
+    private var serial: ObdLink? = null
+    private var diag: DiagSession? = null
 
     // Trip bookkeeping (only touched from the loop coroutine)
     private var tripActive = false
@@ -164,7 +170,7 @@ class TripService : LifecycleService() {
         serial?.close()
         LiveStatus.update {
             Status(serviceRunning = false, androidAuto = it.androidAuto, carBluetooth = it.carBluetooth,
-                dongle = if (settings.current.dongleMac == null) DongleState.NOT_PAIRED else DongleState.STOPPED)
+                dongle = if (!settings.current.adapterConfigured) DongleState.NOT_PAIRED else DongleState.STOPPED)
         }
         super.onDestroy()
     }
@@ -176,32 +182,44 @@ class TripService : LifecycleService() {
         var lastActivityAt = System.currentTimeMillis()
         while (lifecycleScope.isActive && !stopping) {
             val s = settings.current
-            val mac = s.dongleMac
-            if (mac == null) {
-                setDongle(DongleState.NOT_PAIRED, "Pair the OBD dongle in the app")
-                return
-            }
-            if (!hasBtPermission()) {
-                setDongle(DongleState.ERROR, "Nearby devices permission missing")
-                return
-            }
-            val adapter = getSystemService(BluetoothManager::class.java)?.adapter
-            if (adapter == null || !adapter.isEnabled) {
-                setDongle(DongleState.ERROR, "Bluetooth is off")
-                if (idleFor(lastActivityAt)) return
-                withTimeoutOrNull(30_000) { wake.receive() }
-                continue
-            }
-
-            val link = BleSerial(this, adapter.getRemoteDevice(mac))
-            serial = link
-            val connected = if (firstAttempt) {
-                setDongle(DongleState.CONNECTING)
-                link.connect(autoConnect = false, timeoutMs = 20_000)
+            val link: ObdLink
+            val connected: Boolean
+            if (s.adapterKind.isBle) {
+                val mac = s.dongleMac
+                if (mac == null) {
+                    setDongle(DongleState.NOT_PAIRED, "Pair the OBD dongle in the app")
+                    return
+                }
+                if (!hasBtPermission()) {
+                    setDongle(DongleState.ERROR, "Nearby devices permission missing")
+                    return
+                }
+                val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+                if (adapter == null || !adapter.isEnabled) {
+                    setDongle(DongleState.ERROR, "Bluetooth is off")
+                    if (idleFor(lastActivityAt)) return
+                    withTimeoutOrNull(30_000) { wake.receive() }
+                    continue
+                }
+                val ble = BleSerial(this, adapter.getRemoteDevice(mac))
+                link = ble
+                serial = ble
+                connected = if (firstAttempt) {
+                    setDongle(DongleState.CONNECTING)
+                    ble.connect(autoConnect = false, timeoutMs = 20_000)
+                } else {
+                    // Background reconnect: the controller watches for the dongle at low duty cycle.
+                    setDongle(DongleState.WAITING)
+                    ble.connect(autoConnect = true, timeoutMs = 4 * 60_000L)
+                }
             } else {
-                // Background reconnect: the controller watches for the dongle at low duty cycle.
-                setDongle(DongleState.WAITING)
-                link.connect(autoConnect = true, timeoutMs = 4 * 60_000L)
+                // WiCAN Pro over Wi-Fi: only reachable while the phone shares its network.
+                val tcp = TcpLink(s.wifiHost.trim(), s.wifiPort)
+                link = tcp
+                serial = tcp
+                setDongle(if (firstAttempt) DongleState.CONNECTING else DongleState.WAITING)
+                connected = tcp.connect(timeoutMs = 8_000)
+                if (!connected) withTimeoutOrNull(30_000) { wake.receive() }
             }
             firstAttempt = false
             if (!connected) {
@@ -240,7 +258,7 @@ class TripService : LifecycleService() {
     }
 
     /** Returns true when leaving because nothing happened for [IDLE_STOP_MS]. */
-    private suspend fun session(link: BleSerial, reader: CarReader): Boolean {
+    private suspend fun session(link: ObdLink, reader: CarReader): Boolean {
         var probeArmed = true
         var lastProbeAt = 0L
         var lastOdoAt = 0L
@@ -283,6 +301,7 @@ class TripService : LifecycleService() {
                         is OdoResult.Ok -> {
                             accept(r)
                             startTrip(r.km, trigger)
+                            if (s.healthEnabled) diag = DiagSession(this, link, reader, r.km)
                             failures = 0
                             lastOdoAt = now
                             lastEngineRunningAt = now
@@ -293,7 +312,9 @@ class TripService : LifecycleService() {
                     LiveStatus.update { it.copy(lastPollAt = now) }
                 }
             } else {
-                if (now - lastOdoAt >= POLL_MS || manual || signalFell) {
+                // While the health sampler is busy under boost the odometer can wait (up to 3 min).
+                val odoDue = now - lastOdoAt >= POLL_MS && (diag?.busy != true || now - lastOdoAt >= 3 * POLL_MS)
+                if (odoDue || manual || signalFell) {
                     lastOdoAt = now
                     when (val r = reader.readOdometer(s.odoSource)) {
                         is OdoResult.Ok -> { accept(r); failures = 0 }
@@ -326,6 +347,7 @@ class TripService : LifecycleService() {
                     else -> null
                 }
                 if (endReason != null) {
+                    diag?.finalReads()
                     endTrip(endReason)
                     failures = 0
                     probeArmed = false // need the voltage to dip and rise again before re-probing
@@ -339,7 +361,12 @@ class TripService : LifecycleService() {
                 return true
             }
             updateNotification()
-            withTimeoutOrNull(TICK_MS) { wake.receive() }
+            val d = diag
+            if (tripActive && d != null && link.connected.value) {
+                d.runFor(TICK_MS, wake) // samples the DME until the next tick or a wake-up
+            } else {
+                withTimeoutOrNull(TICK_MS) { wake.receive() }
+            }
         }
         return false
     }
@@ -376,6 +403,12 @@ class TripService : LifecycleService() {
         val st = store.current
         val s = settings.current
         store.markTrip(null, st.lastKm)
+        diag?.let { d ->
+            diag = null
+            runCatching { d.finish(st.lastKm) }.onFailure {
+                EventLog.log("Engine health: couldn't save the drive (${it.javaClass.simpleName}: ${it.message})")
+            }
+        }
         val driven = if (tripStartKm > 0 && st.lastKm > 0) st.lastKm - tripStartKm else 0
         EventLog.log("Trip ended ($reason): ${st.lastKm} km = ${s.toUploadValue(st.lastKm)} ${s.uploadUnit.label}, +$driven km")
         LiveStatus.update { it.copy(phase = TripPhase.IDLE, tripSince = 0, tripStartKm = -1, engineRpm = null) }
