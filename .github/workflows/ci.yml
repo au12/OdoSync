@@ -61,7 +61,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     permissions:
-      contents: write # create the GitHub release on v* tags
+      contents: write # create the GitHub release (version bump on main, v* tag or manual run)
     env:
       KEYSTORE_B64: ${{ secrets.ODOSYNC_KEYSTORE_BASE64 }}
       ODOSYNC_KEYSTORE_PASSWORD: ${{ secrets.ODOSYNC_KEYSTORE_PASSWORD }}
@@ -85,6 +85,8 @@ jobs:
           cache-provider: basic
 
       - name: Version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           base=$(grep -E '^odosync.version=' gradle.properties | cut -d= -f2)
           release=false
@@ -97,6 +99,11 @@ jobs:
               echo "::error::release_version must look like 0.1.0 (got '$RELEASE_INPUT')"
               exit 1
             fi
+            release=true
+          elif [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/main ]] \
+            && ! gh release view "v$base" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # odosync.version in gradle.properties was bumped and has no release yet: publish it.
+            version="$base"
             release=true
           else
             version="${base}-dev.${GITHUB_RUN_NUMBER}"
