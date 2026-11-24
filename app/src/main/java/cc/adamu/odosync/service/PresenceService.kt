@@ -4,28 +4,18 @@ import android.companion.AssociationInfo
 import android.companion.CompanionDeviceService
 import android.companion.DevicePresenceEvent
 import android.os.Build
-import cc.adamu.odosync.data.EventLog
-import cc.adamu.odosync.data.Settings
-import cc.adamu.odosync.data.TripStore
 
 /**
- * The system binds this when the associated dongle starts or stops advertising nearby.
- * Note: most BLE dongles stop advertising while connected, so "disappeared" during a session is
- * normal and ignored by TripService.
+ * Companion presence callbacks (the dongle advertising nearby). Unused since 0.1.2 apart from
+ * a guard; presence observation is switched off at startup.
  */
 class PresenceService : CompanionDeviceService() {
 
+    // Presence wake-ups are no longer used: OdoSync only connects once the phone is on the car's
+    // Bluetooth (CarBtReceiver), so it never holds the dongle at home. Kept so an observation
+    // left over from an older version can't start anything by itself.
     private fun appeared(source: String) {
-        val store = TripStore.get(this)
-        val s = Settings.get(this).current
-        // After we released the dongle for inactivity it starts advertising again; don't bounce
-        // straight back in. A car Bluetooth connection or opening the app still wakes us.
-        val sinceIdle = System.currentTimeMillis() - store.lastIdleStop()
-        if (sinceIdle < 30 * 60_000L && !CarBtState.anyConnected(s.carBtMacs)) {
-            EventLog.log("Dongle advertising ($source) - ignored, released it ${sinceIdle / 60_000} min ago")
-            return
-        }
-        TripService.start(this, "dongle nearby ($source)")
+        if (CarBtState.anyConnected()) TripService.start(this, "dongle nearby ($source)")
     }
 
     private fun disappeared() {

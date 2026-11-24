@@ -131,7 +131,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
             "Allow Nearby devices" to perms,
             "Connect LubeLogger and pick the car" to s.lubeLoggerConfigured,
             "Pair the OBD dongle" to (s.dongleMac != null),
-            "Choose the car's Bluetooth (recommended)" to s.carBtMacs.isNotEmpty(),
+            "Choose the car's Bluetooth" to s.carBtMacs.isNotEmpty(),
         )
         if (steps.any { !it.second }) {
             Section("Finish setup", subtitle = "${steps.count { it.second }} of ${steps.size} done") {
@@ -172,7 +172,7 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
                 when { !s.useAndroidAuto -> "Ignored"; live.androidAuto -> "Projecting"; else -> "Off" },
                 if (live.androidAuto && s.useAndroidAuto) Tone.GOOD else Tone.IDLE)
             StatusRow(Icons.Outlined.Bluetooth, "Car Bluetooth",
-                when { s.carBtMacs.isEmpty() -> "Not set"; live.carBluetooth -> "Connected"; else -> "Off" },
+                when { live.carBluetooth -> "Connected"; s.carBtMacs.isEmpty() -> "Auto-detect"; else -> "Off" },
                 if (live.carBluetooth) Tone.GOOD else Tone.IDLE)
             StatusRow(Icons.Outlined.BatteryChargingFull, "Battery",
                 live.voltage?.let { "%.1f V".format(it) } ?: "—")
@@ -186,8 +186,8 @@ fun DashboardScreen(activity: MainActivity, onOpenSettings: () -> Unit) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Hint(
-                    if (live.serviceRunning) "Monitoring - holds the dongle while the car is nearby"
-                    else "Wakes up automatically when you get in the car",
+                    if (live.serviceRunning) "Connected while you're in the car - released when you leave"
+                    else "Connects when your phone joins the car's Bluetooth",
                     Modifier.weight(1f),
                 )
                 if (live.serviceRunning) {

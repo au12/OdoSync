@@ -20,7 +20,24 @@ data class TripState(
     val lastTripStartKm: Long = -1,
     val lastTripEndKm: Long = -1,
     val lastTripEndAt: Long = 0,
+    /** Start time of the trip in progress (or the last one). */
+    val tripStartAt: Long = 0,
+    /** The last finished trip, shown in the dismissable summary notification. */
+    val summary: TripSummary? = null,
 )
+
+enum class UploadOutcome { QUEUED, WAITING_WIFI, UPLOADED, ALREADY_THERE, BELOW_MIN, NOT_CONFIGURED, RETRYING, FAILED }
+
+data class TripSummary(
+    val startKm: Long,
+    val endKm: Long,
+    val startAt: Long,
+    val endAt: Long,
+    val upload: UploadOutcome,
+    val uploadMessage: String = "",
+) {
+    val distanceKm: Long get() = (endKm - startKm).coerceAtLeast(0)
+}
 
 class TripStore private constructor(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("trip", Context.MODE_PRIVATE)
@@ -39,6 +56,16 @@ class TripStore private constructor(context: Context) {
         lastTripStartKm = prefs.getLong("lastTripStartKm", -1),
         lastTripEndKm = prefs.getLong("lastTripEndKm", -1),
         lastTripEndAt = prefs.getLong("lastTripEndAt", 0),
+        tripStartAt = prefs.getLong("tripStartAt", 0),
+        summary = if (prefs.getLong("sumEndAt", 0) <= 0) null else TripSummary(
+            startKm = prefs.getLong("sumStartKm", -1),
+            endKm = prefs.getLong("sumEndKm", -1),
+            startAt = prefs.getLong("sumStartAt", 0),
+            endAt = prefs.getLong("sumEndAt", 0),
+            upload = runCatching { UploadOutcome.valueOf(prefs.getString("sumUpload", "")!!) }
+                .getOrDefault(UploadOutcome.QUEUED),
+            uploadMessage = prefs.getString("sumUploadMsg", "")!!,
+        ),
     )
 
     @Synchronized
@@ -55,7 +82,10 @@ class TripStore private constructor(context: Context) {
     @Synchronized
     fun markTrip(startKm: Long?, endKm: Long?) {
         prefs.edit().apply {
-            if (startKm != null) putLong("lastTripStartKm", startKm)
+            if (startKm != null) {
+                putLong("lastTripStartKm", startKm)
+                putLong("tripStartAt", System.currentTimeMillis())
+            }
             if (endKm != null) {
                 putLong("lastTripEndKm", endKm)
                 putLong("lastTripEndAt", System.currentTimeMillis())
@@ -82,8 +112,25 @@ class TripStore private constructor(context: Context) {
         _flow.value = read()
     }
 
-    fun setLastIdleStop(t: Long) { prefs.edit().putLong("lastIdleStop", t).apply() }
-    fun lastIdleStop(): Long = prefs.getLong("lastIdleStop", 0)
+    @Synchronized
+    fun saveSummary(sum: TripSummary) {
+        prefs.edit()
+            .putLong("sumStartKm", sum.startKm).putLong("sumEndKm", sum.endKm)
+            .putLong("sumStartAt", sum.startAt).putLong("sumEndAt", sum.endAt)
+            .putString("sumUpload", sum.upload.name).putString("sumUploadMsg", sum.uploadMessage)
+            .commit()
+        _flow.value = read()
+    }
+
+    /** Record an upload result against the last trip, if that trip is what was being uploaded. */
+    @Synchronized
+    fun setSummaryUpload(uploadedKm: Long, outcome: UploadOutcome, message: String = ""): Boolean {
+        val sum = read().summary ?: return false
+        val waiting = sum.upload in setOf(UploadOutcome.QUEUED, UploadOutcome.WAITING_WIFI, UploadOutcome.RETRYING)
+        if (!waiting || uploadedKm < sum.endKm) return false
+        saveSummary(sum.copy(upload = outcome, uploadMessage = message))
+        return true
+    }
 
     /** Units/offset/vehicle changed: forget the old baseline so the next reading is uploaded. */
     @Synchronized

@@ -22,24 +22,25 @@ exactly as before (see [Android Auto coexistence](#android-auto-coexistence)).
 
 ## How a drive works
 
-1. **Wake-up.** OdoSync starts when one of these happens:
-   - your phone connects to the car's Bluetooth (the wireless AA adapter or head unit)
-   - the paired dongle starts advertising nearby (companion-device presence)
-   - you open the app
-2. **Idle link.** OdoSync opens a low-duty BLE link and reads only the adapter's own voltage
-   (`ATRV`). That command never touches the car's CAN bus, so a parked car is never woken or
-   kept awake.
-3. **Trip start.** Android Auto is projecting, the car's Bluetooth is linked, or the voltage
-   jumps above ~13.1 V (alternator charging). OdoSync then asks the instrument cluster for the
-   odometer. If the cluster answers, the trip is on.
+1. **Get in the car.** Your phone joins the car's Bluetooth (the wireless AA adapter or head
+   unit). That's the only thing that starts OdoSync in the background. At home it doesn't run,
+   scan or hold the dongle, and opening the app doesn't connect either. If no car device is
+   picked in Settings, any device that reports itself as car audio counts.
+2. **Connect.** OdoSync opens a low-duty BLE link to the dongle. While waiting for the engine it
+   reads only the adapter's own voltage (`ATRV`), which never touches the car's CAN bus.
+3. **Trip start.** Once Android Auto or the car's Bluetooth is up and the instrument cluster
+   answers, the trip is on. An ongoing notification shows distance, time and the odometer.
 4. **During the trip.** One odometer read a minute: a 5-byte request and a 2-frame reply.
-5. **Trip end.** Android Auto or car Bluetooth drops and the engine is off. Without AA, it's
-   the engine staying off longer than an auto start/stop pause (2.5 min), or the car going
-   silent. The last reading goes into the upload queue.
-6. **Upload.** WorkManager posts it to LubeLogger once a network is available, retrying with
-   backoff. Before posting, OdoSync checks LubeLogger's latest odometer and never writes a
-   lower number. Readings are saved to disk the moment they're taken, so an app kill
-   mid-drive loses nothing.
+5. **Trip end.** Android Auto or car Bluetooth drops and the engine is off. (Without AA, it's
+   the engine staying off longer than an auto start/stop pause, or the car going silent.) The
+   ongoing notification goes away and a dismissable **Trip complete** notification shows the
+   distance, duration, average speed and odometer.
+6. **Upload.** WorkManager posts the reading to LubeLogger once a network is available, retrying
+   with backoff, and the trip notification updates with the result (uploaded, or why not).
+   OdoSync never writes a number lower than LubeLogger already has. Readings are saved the
+   moment they're taken, so an app kill mid-drive loses nothing.
+7. **Release.** About 90 seconds after the car's Bluetooth disconnects, OdoSync drops the dongle
+   and stops.
 
 ## Where the odometer comes from
 
@@ -74,15 +75,15 @@ OdoSync stays off both:
 - **BLE only, no bonding.** The dongle is never paired in Android's Bluetooth settings, never
   becomes an audio or hands-free device, and never competes with the car for HFP. (The
   Veepeak is dual-mode. Don't pair its classic side.)
-- **Lowest-duty radio use.** The link runs at `CONNECTION_PRIORITY_LOW_POWER` (~100 ms
-  interval). OdoSync never scans on its own: the system's companion-device service handles
-  presence, and reconnects use `autoConnect` (controller-managed, low duty). During an AA
-  drive the traffic is about 60 bytes a minute.
+- **Lowest-duty radio use.** The link exists only while you're in the car and runs at
+  `CONNECTION_PRIORITY_LOW_POWER` (~100 ms interval). OdoSync never scans; reconnects use
+  `autoConnect` (controller-managed, low duty). During an AA drive the traffic is about 60 bytes
+  a minute.
 - **No Wi-Fi use.** The dongle is BLE. Uploads are network-constrained WorkManager jobs that
   run at trip end. While AA's Wi-Fi link (which has no internet) is up, Android routes them
   over cellular. Turn on *Upload only on Wi-Fi* to wait until you're home.
-- **Silent.** No audio focus, sounds or vibration. The foreground notification is
-  `IMPORTANCE_MIN`. OdoSync isn't an Android Auto app and never appears on the car screen.
+- **Silent.** No audio focus, sounds or vibration. The in-car notification is
+  `IMPORTANCE_MIN` and the trip summary is silent. OdoSync isn't an Android Auto app and never appears on the car screen.
 - **Single-client dongle.** While OdoSync holds the dongle, apps like BimmerLink or Car
   Scanner can't use it. Tap *Release dongle* first.
 
@@ -98,7 +99,7 @@ OdoSync stays off both:
    "VEEPEAK" in the system sheet. This is a *companion-device* association, not Bluetooth
    pairing.
 4. **Trip detection.** Tick the car's Bluetooth device, i.e. the one your phone connects to
-   for wireless AA. This is the most reliable trigger.
+   for wireless AA. OdoSync connects to the dongle only after your phone joins it.
 5. **First drive.** Check the Status tab: the odometer card shows `xxx mi` with the raw km
    underneath. If the miles differ from the dash, set **Offset**.
 
@@ -112,8 +113,9 @@ trip start/end and upload.
 - **Odometer read failed: KOMBI: unparsed reply …**: share the log. The raw reply is in it.
 - **Upload failed: HTTP 401**: wrong key or credentials, or the key isn't *Editor*. An HTML
   reply means LubeLogger redirected to its login page.
-- **Nothing happens when you get in the car**: make sure step 4 is done, and that *Battery
-  optimisation* shows *Unrestricted* on the Setup tab (pairing usually takes care of it).
+- **Nothing happens when you get in the car**: make sure step 4 is done (the Activity tab should
+  log "Car Bluetooth connected"), and that *Background use* under Settings → Advanced shows
+  *Unrestricted* (pairing usually takes care of it).
 
 ## Build & releases
 
@@ -142,4 +144,4 @@ repository secrets `ODOSYNC_KEYSTORE_BASE64` (`base64 -w0 odosync-release.jks`),
 without the release key, because a debug-signed APK can't be updated by later releases. Never
 commit the keystore (`*.jks` is git-ignored).
 
-Requirements: Android 12+ (companion-device presence) and a phone with Bluetooth LE.
+Requirements: Android 12+ (companion device pairing) and a phone with Bluetooth LE.

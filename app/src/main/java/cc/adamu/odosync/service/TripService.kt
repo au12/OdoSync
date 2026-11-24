@@ -26,6 +26,8 @@ import cc.adamu.odosync.data.Settings
 import cc.adamu.odosync.data.Status
 import cc.adamu.odosync.data.TripPhase
 import cc.adamu.odosync.data.TripStore
+import cc.adamu.odosync.data.TripSummary
+import cc.adamu.odosync.data.UploadOutcome
 import cc.adamu.odosync.obd.CarReader
 import cc.adamu.odosync.obd.Elm327
 import cc.adamu.odosync.obd.OdoResult
@@ -70,7 +72,9 @@ class TripService : LifecycleService() {
         private const val POLL_MS = 60_000L             // odometer cadence during a trip
         private const val PROBE_EVERY_MS = 60_000L      // retry cadence while a level trigger holds
         private const val ENGINE_OFF_GRACE_MS = 150_000L // > typical auto start/stop pause
-        private const val IDLE_STOP_MS = 10 * 60_000L   // release the dongle when nothing is happening
+        // Release the dongle and stop once the car's Bluetooth has been gone this long with no trip
+        // (long enough to ride out a Bluetooth hiccup or finish a manual "Read now").
+        private const val LINGER_MS = 90_000L
 
         fun start(context: Context, reason: String) =
             send(context, ACTION_START) { putExtra(EXTRA_REASON, reason) }
@@ -117,8 +121,8 @@ class TripService : LifecycleService() {
         }
 
         loop = lifecycleScope.launch(Dispatchers.Default) {
-            val macs = settings.current.carBtMacs
-            carBtConnected = CarBtState.anyConnected(macs) || CarBtState.probe(this@TripService, macs)
+            carBtConnected = CarBtState.anyConnected() ||
+                CarBtState.probe(this@TripService, settings.current.carBtMacs)
             LiveStatus.update { it.copy(carBluetooth = carBtConnected) }
             try {
                 runLoop()
@@ -140,13 +144,14 @@ class TripService : LifecycleService() {
         when (intent?.action ?: ACTION_START) {
             ACTION_START -> {
                 stopping = false
-                intent?.getStringExtra(EXTRA_REASON)?.let { EventLog.log("Service woken: $it") }
+                intent?.getStringExtra(EXTRA_REASON)?.let { EventLog.log("Connecting to dongle: $it") }
             }
             ACTION_DONGLE_GONE -> EventLog.log("Dongle no longer advertising")
             ACTION_CAR_BT -> {
                 val c = intent?.getBooleanExtra(EXTRA_CONNECTED, false) ?: false
-                carBtConnected = c || CarBtState.anyConnected(settings.current.carBtMacs)
+                carBtConnected = c || CarBtState.anyConnected()
                 LiveStatus.update { it.copy(carBluetooth = carBtConnected) }
+                if (c) stopping = false
             }
             ACTION_READ_NOW -> readNowRequested = true
             ACTION_STOP -> {
@@ -162,6 +167,7 @@ class TripService : LifecycleService() {
         stopping = true
         loop?.cancel()
         serial?.close()
+        ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         LiveStatus.update {
             Status(serviceRunning = false, androidAuto = it.androidAuto, carBluetooth = it.carBluetooth,
                 dongle = if (settings.current.dongleMac == null) DongleState.NOT_PAIRED else DongleState.STOPPED)
@@ -188,7 +194,7 @@ class TripService : LifecycleService() {
             val adapter = getSystemService(BluetoothManager::class.java)?.adapter
             if (adapter == null || !adapter.isEnabled) {
                 setDongle(DongleState.ERROR, "Bluetooth is off")
-                if (idleFor(lastActivityAt)) return
+                if (!carSignal() && idleFor(lastActivityAt)) return
                 withTimeoutOrNull(30_000) { wake.receive() }
                 continue
             }
@@ -201,13 +207,13 @@ class TripService : LifecycleService() {
             } else {
                 // Background reconnect: the controller watches for the dongle at low duty cycle.
                 setDongle(DongleState.WAITING)
-                link.connect(autoConnect = true, timeoutMs = 4 * 60_000L)
+                link.connect(autoConnect = true, timeoutMs = 60_000L)
             }
             firstAttempt = false
             if (!connected) {
                 if (carSignal()) lastActivityAt = System.currentTimeMillis()
                 if (idleFor(lastActivityAt)) {
-                    EventLog.log("Dongle not reachable and no car activity; going idle")
+                    EventLog.log("Dongle not reachable and the car's Bluetooth is gone; stopping")
                     return
                 }
                 continue
@@ -232,14 +238,11 @@ class TripService : LifecycleService() {
             link.close()
             if (tripActive) endTrip("dongle link lost")
             lastActivityAt = System.currentTimeMillis()
-            if (idleExit) {
-                store.setLastIdleStop(System.currentTimeMillis())
-                return
-            }
+            if (idleExit) return
         }
     }
 
-    /** Returns true when leaving because nothing happened for [IDLE_STOP_MS]. */
+    /** Returns true when leaving because the car is gone (no Bluetooth/AA, no trip) for [LINGER_MS]. */
     private suspend fun session(link: BleSerial, reader: CarReader): Boolean {
         var probeArmed = true
         var lastProbeAt = 0L
@@ -334,8 +337,8 @@ class TripService : LifecycleService() {
             }
 
             if (tripActive || signal || manual) lastActivityAt = now
-            if (!tripActive && now - lastActivityAt > IDLE_STOP_MS) {
-                EventLog.log("Nothing happening for ${IDLE_STOP_MS / 60_000} min; releasing the dongle")
+            if (!tripActive && now - lastActivityAt > LINGER_MS) {
+                EventLog.log("Not in the car any more; releasing the dongle")
                 return true
             }
             updateNotification()
@@ -379,13 +382,24 @@ class TripService : LifecycleService() {
         val driven = if (tripStartKm > 0 && st.lastKm > 0) st.lastKm - tripStartKm else 0
         EventLog.log("Trip ended ($reason): ${st.lastKm} km = ${s.toUploadValue(st.lastKm)} ${s.uploadUnit.label}, +$driven km")
         LiveStatus.update { it.copy(phase = TripPhase.IDLE, tripSince = 0, tripStartKm = -1, engineRpm = null) }
+        var outcome = UploadOutcome.ALREADY_THERE
         if (st.pendingKm > 0) {
             val value = s.toUploadValue(st.pendingKm)
-            if (st.lastUploadedValue < 0 || value >= st.lastUploadedValue + s.minDelta) {
-                UploadWorker.enqueue(this, "trip end")
-            } else {
-                store.clearPendingIfAtMost(st.pendingKm)
+            outcome = when {
+                !s.lubeLoggerConfigured -> UploadOutcome.NOT_CONFIGURED
+                st.lastUploadedValue >= 0 && value < st.lastUploadedValue + s.minDelta -> UploadOutcome.BELOW_MIN
+                s.wifiOnly -> UploadOutcome.WAITING_WIFI
+                else -> UploadOutcome.QUEUED
             }
+            if (outcome == UploadOutcome.BELOW_MIN) store.clearPendingIfAtMost(st.pendingKm)
+            else if (outcome != UploadOutcome.NOT_CONFIGURED) UploadWorker.enqueue(this, "trip end")
+        }
+        // A dismissable summary replaces the ongoing notification once the car is gone.
+        // Skip it for "trips" that went nowhere (sitting in the car with the radio on).
+        if (driven > 0 && tripStartKm > 0) {
+            store.saveSummary(TripSummary(tripStartKm, st.lastKm, store.current.tripStartAt.takeIf { it > 0 }
+                ?: System.currentTimeMillis(), System.currentTimeMillis(), outcome))
+            TripNotifier.show(this)
         }
         tripStartKm = -1
     }
@@ -393,7 +407,7 @@ class TripService : LifecycleService() {
     private fun carSignal(): Boolean =
         (settings.current.useAndroidAuto && aaConnected) || carBtConnected
 
-    private fun idleFor(since: Long) = System.currentTimeMillis() - since > IDLE_STOP_MS
+    private fun idleFor(since: Long) = System.currentTimeMillis() - since > LINGER_MS
 
     private fun hasBtPermission() = ContextCompat.checkSelfPermission(
         this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
@@ -416,24 +430,33 @@ class TripService : LifecycleService() {
         false
     }
 
+    // This notification only exists while the service runs, i.e. while you're in the car (or
+    // right after tapping Read now); it disappears when the car's Bluetooth goes away.
     private fun notificationText(): String {
         val st = LiveStatus.current
         val s = settings.current
         val km = store.current.lastKm
         val odo = if (km > 0) NumberFormat.getIntegerInstance().format(s.toUploadValue(km)) + " " + s.uploadUnit.label else "—"
         return when {
-            st.phase == TripPhase.ACTIVE -> "Trip in progress · $odo"
-            st.dongle == DongleState.CONNECTED -> "Dongle connected · waiting for ignition · $odo"
-            else -> "${st.dongle.label} · $odo"
+            st.phase == TripPhase.ACTIVE -> {
+                val driven = if (st.tripStartKm > 0 && km > 0) km - st.tripStartKm else 0
+                val mins = ((System.currentTimeMillis() - st.tripSince) / 60_000).coerceAtLeast(0)
+                "+${TripNotifier.distance(driven, s.uploadUnit)} · $mins min · $odo"
+            }
+            st.dongle == DongleState.CONNECTED -> "Connected to the dongle · $odo"
+            else -> st.dongle.label
         }
     }
+
+    private fun notificationTitle(): String =
+        if (LiveStatus.current.phase == TripPhase.ACTIVE) "Trip in progress" else "OdoSync"
 
     private fun buildNotification(text: String): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return NotificationCompat.Builder(this, OdoSyncApp.CHANNEL_SERVICE)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("OdoSync")
+            .setContentTitle(notificationTitle())
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(true)
@@ -449,9 +472,10 @@ class TripService : LifecycleService() {
 
     @SuppressLint("MissingPermission")
     private fun updateNotification() {
-        val text = notificationText()
+        val text = notificationTitle() + notificationText()
         if (text == lastNotifText) return
         lastNotifText = text
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))
+        if (stopping) return
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(notificationText()))
     }
 }

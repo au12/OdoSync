@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import cc.adamu.odosync.data.LiveStatus
 import cc.adamu.odosync.data.Settings
+import cc.adamu.odosync.service.CarBtState
 import cc.adamu.odosync.service.TripService
 
 class MainActivity : ComponentActivity() {
@@ -84,9 +85,10 @@ class MainActivity : ComponentActivity() {
             .all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
     }
 
-    /** Opening the app connects to the dongle if it's paired, so you can watch it work. */
+    /** Opening the app only joins in if you're already in the car; it never connects at home. */
     fun maybeStartService(reason: String) {
-        if (Settings.get(this).current.dongleMac != null && !LiveStatus.current.serviceRunning) {
+        if (Settings.get(this).current.dongleMac != null && !LiveStatus.current.serviceRunning &&
+            CarBtState.anyConnected()) {
             TripService.start(this, reason)
         }
     }

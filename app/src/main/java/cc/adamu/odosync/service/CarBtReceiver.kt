@@ -18,11 +18,13 @@ class CarBtReceiver : BroadcastReceiver() {
         val device = IntentCompat.getParcelableExtra(intent, BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
             ?: return
         val settings = Settings.get(context).current
-        if (device.address !in settings.carBtMacs) return
+        if (!CarBtState.isCar(device, settings.carBtMacs)) return
         when (intent.action) {
             BluetoothDevice.ACTION_ACL_CONNECTED -> {
                 CarBtState.set(device.address, true)
                 EventLog.log("Car Bluetooth connected (${device.address})")
+                if (settings.dongleMac == null) return
+                // This is the only automatic way the dongle connection starts: in the car.
                 TripService.send(context, TripService.ACTION_CAR_BT) {
                     putExtra(TripService.EXTRA_CONNECTED, true)
                 }

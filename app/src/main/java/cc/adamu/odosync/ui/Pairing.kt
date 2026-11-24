@@ -108,26 +108,29 @@ class DonglePairing(private val activity: ComponentActivity) {
             putString("dongleName", name ?: "OBD dongle")
         }
         EventLog.log("Dongle paired: ${name ?: "?"} ($mac)")
-        observePresence(activity, mac, associationId)
+        // Connect once now (you're in the car with the ignition on while pairing).
         TripService.start(activity, "dongle paired")
     }
 
     companion object {
-        fun observePresence(context: Context, mac: String, associationId: Int? = null) {
+        /**
+         * Turn off companion presence observation (0.1.0/0.1.1 used it to wake on the dongle
+         * advertising). That background BLE scanning is wasted battery now that only the car's
+         * Bluetooth starts a session.
+         */
+        fun stopObservingPresence(context: Context, mac: String) {
             val cdm = context.getSystemService(CompanionDeviceManager::class.java)
             runCatching {
                 if (Build.VERSION.SDK_INT >= 36) {
-                    val id = associationId ?: cdm.myAssociations
-                        .firstOrNull { it.deviceMacAddress?.toString().equals(mac, true) }?.id
-                    if (id != null) {
-                        cdm.startObservingDevicePresence(
-                            ObservingDevicePresenceRequest.Builder().setAssociationId(id).build())
+                    cdm.myAssociations.filter { it.deviceMacAddress?.toString().equals(mac, true) }.forEach {
+                        cdm.stopObservingDevicePresence(
+                            ObservingDevicePresenceRequest.Builder().setAssociationId(it.id).build())
                     }
                 } else {
                     @Suppress("DEPRECATION")
-                    cdm.startObservingDevicePresence(mac)
+                    cdm.stopObservingDevicePresence(mac)
                 }
-            }.onFailure { EventLog.log("Presence observation not available: ${it.message}") }
+            }
         }
 
         fun unpair(context: Context) {

@@ -263,7 +263,9 @@ private fun TripDetectionSection(store: Settings, perms: Boolean) {
     val s by store.flow.collectAsStateWithLifecycle()
     Section("Trip detection", icon = Icons.Outlined.Route, subtitle = "How OdoSync knows you're driving") {
         Text("Car Bluetooth", style = MaterialTheme.typography.labelLarge)
-        Hint("Tick the device your phone connects to for wireless Android Auto - the most reliable trigger.")
+        Hint("OdoSync only connects to the dongle after your phone joins one of these (your wireless " +
+            "Android Auto adapter or head unit), and lets go when it disconnects. With none ticked, any " +
+            "device that reports itself as car audio counts.")
         BondedDevicePicker(s.carBtMacs, perms) { macs -> store.update { putStringSet("carBtMacs", macs) } }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         SwitchRow("Android Auto", "Treat projecting to the car as a trip signal", s.useAndroidAuto) {
